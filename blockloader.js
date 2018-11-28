@@ -47,8 +47,10 @@ define([
     function addBlockLoader(element) {
         element.find(':focus').blur();
         element.find('input:disabled, select:disabled').addClass('_disabled');
-        element.find('input, select').prop('disabled', true);
-
+        if (element.attr('id') != 'opc-shipping_method') {
+            element.find('input, select').prop('disabled', true);
+        }
+        
         if (isLoadingClassRequired(element)) {
             element.addClass(blockContentLoadingClass);
         }
