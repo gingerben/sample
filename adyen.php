@@ -142,6 +142,12 @@ class PaymentMethods extends AbstractHelper
         // get quote from quoteId
         $quote = $this->_quoteRepository->getActive($quoteId);
         $store = $quote->getStore();
+        // return null if order contains giftcard
+        foreach ($quote->getItems() as $item) {
+            if($item && $item->getProductType() === 'giftcard') {
+                return [];
+            }
+        }
         $paymentMethods = $this->_addHppMethodsToConfig($store, $country);
         return $paymentMethods;
     }
