@@ -149,7 +149,7 @@
                 default="0" comment="Store ID"/>
         <column xsi:type="int" name="entity_id" padding="10" unsigned="true" nullable="false" identity="false"
                 default="0" comment="Entity ID"/>
-        <column xsi:type="text" name="value" nullable="true" comment="Value"/>
+        <column xsi:type="mediumtext" name="value" nullable="true" comment="Value"/>
         <constraint xsi:type="primary" referenceId="PRIMARY">
             <column name="value_id"/>
         </constraint>
@@ -403,7 +403,7 @@
                 default="0" comment="Store ID"/>
         <column xsi:type="int" name="entity_id" padding="10" unsigned="true" nullable="false" identity="false"
                 default="0" comment="Entity ID"/>
-        <column xsi:type="text" name="value" nullable="true" comment="Value"/>
+        <column xsi:type="mediumtext" name="value" nullable="true" comment="Value"/>
         <constraint xsi:type="primary" referenceId="PRIMARY">
             <column name="value_id"/>
         </constraint>
