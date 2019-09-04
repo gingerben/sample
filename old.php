@@ -261,14 +261,14 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
         $groupRelations = [];
 
         foreach ($this->getPaymentMethods() as $code => $data) {
-            if (!empty($data['active'])) {
-                $storedTitle = $this->getMethodInstance($code)->getConfigData('title', $store);
-                if (isset($storedTitle)) {
-                    $methods[$code] = $storedTitle;
-                } elseif (isset($data['title'])) {
-                    $methods[$code] = $data['title'];
-                }
+            
+            $storedTitle = $this->getMethodInstance($code)->getConfigData('title', $store);
+            if (isset($storedTitle)) {
+                $methods[$code] = $storedTitle;
+            } elseif (isset($data['title'])) {
+                $methods[$code] = $data['title'];
             }
+
             if ($asLabelValue && $withGroups && isset($data['group'])) {
                 $groupRelations[$code] = $data['group'];
             }
