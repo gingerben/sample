@@ -3,402 +3,351 @@
  * Copyright © Magento, Inc. All rights reserved.
  * See COPYING.txt for license details.
  */
-namespace Magento\Catalog\Model\Indexer\Product\Flat;
+namespace Magento\Payment\Helper;
 
-use Magento\Catalog\Api\Data\ProductInterface;
-use Magento\Framework\App\ResourceConnection;
-use Magento\Framework\EntityManager\MetadataPool;
+use Magento\Quote\Model\Quote;
+use Magento\Store\Model\Store;
+use Magento\Payment\Block\Form;
+use Magento\Payment\Model\InfoInterface;
+use Magento\Framework\View\Element\Template;
+use Magento\Framework\View\LayoutInterface;
+use Magento\Framework\View\LayoutFactory;
+use Magento\Payment\Model\Method\AbstractMethod;
+use Magento\Payment\Model\MethodInterface;
 
 /**
- * Class FlatTableBuilder
+ * Payment module base helper
  * @SuppressWarnings(PHPMD.CouplingBetweenObjects)
+ *
+ * @api
+ * @since 100.0.2
  */
-class FlatTableBuilder
+class Data extends \Magento\Framework\App\Helper\AbstractHelper
 {
-    /**
-     * @var MetadataPool
-     */
-    protected $metadataPool;
+    const XML_PATH_PAYMENT_METHODS = 'payment';
 
     /**
-     * Path to maximum available amount of indexes for flat indexer
+     * @var \Magento\Payment\Model\Config
      */
-    const XML_NODE_MAX_INDEX_COUNT = 'catalog/product/flat/max_index_count';
+    protected $_paymentConfig;
 
     /**
-     * @var \Magento\Catalog\Helper\Product\Flat\Indexer
+     * Layout
+     *
+     * @var \Magento\Framework\View\LayoutInterface
      */
-    protected $_productIndexerHelper;
+    protected $_layout;
 
     /**
-     * @var \Magento\Framework\DB\Adapter\AdapterInterface
+     * Factory for payment method models
+     *
+     * @var \Magento\Payment\Model\Method\Factory
      */
-    protected $_connection;
+    protected $_methodFactory;
 
     /**
-     * @var \Magento\Framework\App\Config\ScopeConfigInterface $config
+     * App emulation model
+     *
+     * @var \Magento\Store\Model\App\Emulation
      */
-    protected $_config;
+    protected $_appEmulation;
 
     /**
-     * @var \Magento\Store\Model\StoreManagerInterface
+     * @var \Magento\Framework\App\Config\Initial
      */
-    protected $_storeManager;
+    protected $_initialConfig;
 
     /**
-     * @var TableDataInterface
-     */
-    protected $_tableData;
-
-    /**
-     * @var \Magento\Framework\App\ResourceConnection
-     */
-    protected $resource;
-
-    /**
-     * @param \Magento\Catalog\Helper\Product\Flat\Indexer $productIndexerHelper
-     * @param ResourceConnection $resource
-     * @param \Magento\Framework\App\Config\ScopeConfigInterface $config
-     * @param \Magento\Store\Model\StoreManagerInterface $storeManager
-     * @param TableDataInterface $tableData
+     * Construct
+     *
+     * @param \Magento\Framework\App\Helper\Context $context
+     * @param LayoutFactory $layoutFactory
+     * @param \Magento\Payment\Model\Method\Factory $paymentMethodFactory
+     * @param \Magento\Store\Model\App\Emulation $appEmulation
+     * @param \Magento\Payment\Model\Config $paymentConfig
+     * @param \Magento\Framework\App\Config\Initial $initialConfig
      */
     public function __construct(
-        \Magento\Catalog\Helper\Product\Flat\Indexer $productIndexerHelper,
-        \Magento\Framework\App\ResourceConnection $resource,
-        \Magento\Framework\App\Config\ScopeConfigInterface $config,
-        \Magento\Store\Model\StoreManagerInterface $storeManager,
-        \Magento\Catalog\Model\Indexer\Product\Flat\TableDataInterface $tableData
+        \Magento\Framework\App\Helper\Context $context,
+        LayoutFactory $layoutFactory,
+        \Magento\Payment\Model\Method\Factory $paymentMethodFactory,
+        \Magento\Store\Model\App\Emulation $appEmulation,
+        \Magento\Payment\Model\Config $paymentConfig,
+        \Magento\Framework\App\Config\Initial $initialConfig
     ) {
-        $this->_productIndexerHelper = $productIndexerHelper;
-        $this->resource = $resource;
-        $this->_connection = $resource->getConnection();
-        $this->_config = $config;
-        $this->_storeManager = $storeManager;
-        $this->_tableData = $tableData;
+        parent::__construct($context);
+        $this->_layout = $layoutFactory->create();
+        $this->_methodFactory = $paymentMethodFactory;
+        $this->_appEmulation = $appEmulation;
+        $this->_paymentConfig = $paymentConfig;
+        $this->_initialConfig = $initialConfig;
     }
 
     /**
-     * Prepare temporary flat tables
+     * Get config name of method model
      *
-     * @param int|string $storeId
-     * @param array $changedIds
-     * @param string $valueFieldSuffix
-     * @param string $tableDropSuffix
-     * @param bool $fillTmpTables
-     * @return void
+     * @param string $code
+     * @return string
      */
-    public function build($storeId, $changedIds, $valueFieldSuffix, $tableDropSuffix, $fillTmpTables)
+    protected function getMethodModelConfigName($code)
     {
-        $attributes = $this->_productIndexerHelper->getAttributes();
-        $eavAttributes = $this->_productIndexerHelper->getTablesStructure($attributes);
+        return sprintf('%s/%s/model', self::XML_PATH_PAYMENT_METHODS, $code);
+    }
 
-        $this->_createTemporaryFlatTable($storeId);
+    /**
+     * Retrieve method model object
+     *
+     * @param string $code
+     *
+     * @throws \Magento\Framework\Exception\LocalizedException
+     * @return MethodInterface
+     */
+    public function getMethodInstance($code)
+    {
+        $class = $this->scopeConfig->getValue(
+            $this->getMethodModelConfigName($code),
+            \Magento\Store\Model\ScopeInterface::SCOPE_STORE
+        );
 
-        if ($fillTmpTables) {
-            $this->_fillTemporaryFlatTable($eavAttributes, $storeId, $valueFieldSuffix);
-            //Update zero based attributes by values from current store
-            $this->_updateTemporaryTableByStoreValues($eavAttributes, $changedIds, $storeId, $valueFieldSuffix);
+        if (!$class) {
+            throw new \UnexpectedValueException('Payment model name is not provided in config!');
         }
 
-        $flatTable = $this->_productIndexerHelper->getFlatTableName($storeId);
-        $flatDropName = $flatTable . $tableDropSuffix;
-        $temporaryFlatTableName = $this->_getTemporaryTableName(
-            $this->_productIndexerHelper->getFlatTableName($storeId)
-        );
-        $this->_tableData->move($flatTable, $flatDropName, $temporaryFlatTableName);
+        return $this->_methodFactory->create($class);
     }
 
     /**
-     * Prepare flat table for store
+     * Get and sort available payment methods for specified or current store
      *
-     * @param int|string $storeId
-     * @return void
-     * @throws \Magento\Framework\Exception\LocalizedException
+     * @param null|string|bool|int $store
+     * @param Quote|null $quote
+     * @return AbstractMethod[]
+     * @deprecated 100.1.3
+     * @see \Magento\Payment\Api\PaymentMethodListInterface
+     */
+    public function getStoreMethods($store = null, $quote = null)
+    {
+        $res = [];
+        $methods = $this->getPaymentMethods();
+
+        foreach (array_keys($methods) as $code) {
+            $model = $this->scopeConfig->getValue(
+                $this->getMethodModelConfigName($code),
+                \Magento\Store\Model\ScopeInterface::SCOPE_STORE,
+                $store
+            );
+            if (!$model) {
+                continue;
+            }
+
+            /** @var AbstractMethod $methodInstance */
+            $methodInstance = $this->_methodFactory->create($model);
+            $methodInstance->setStore($store);
+            if (!$methodInstance->isAvailable($quote)) {
+                /* if the payment method cannot be used at this time */
+                continue;
+            }
+            $res[] = $methodInstance;
+        }
+
+        @uasort(
+            $res,
+            function (MethodInterface $a, MethodInterface $b) {
+                return (int)$a->getConfigData('sort_order') <=> (int)$b->getConfigData('sort_order');
+            }
+        );
+
+        return $res;
+    }
+
+    /**
+     * Retrieve payment method form html
+     *
+     * @param MethodInterface $method
+     * @param LayoutInterface $layout
+     * @return Form
+     */
+    public function getMethodFormBlock(MethodInterface $method, LayoutInterface $layout)
+    {
+        $block = $layout->createBlock($method->getFormBlockType(), $method->getCode());
+        $block->setMethod($method);
+        return $block;
+    }
+
+    /**
+     * Retrieve payment information block
+     *
+     * @param InfoInterface $info
+     * @param \Magento\Framework\View\LayoutInterface $layout
+     * @return Template
+     */
+    public function getInfoBlock(InfoInterface $info, LayoutInterface $layout = null)
+    {
+        $layout = $layout ?: $this->_layout;
+        $blockType = $info->getMethodInstance()->getInfoBlockType();
+        $block = $layout->createBlock($blockType);
+        $block->setInfo($info);
+        return $block;
+    }
+
+    /**
+     * Render payment information block
+     *
+     * @param InfoInterface $info
+     * @param int $storeId
+     * @return string
+     * @throws \Exception
+     */
+    public function getInfoBlockHtml(InfoInterface $info, $storeId)
+    {
+        $this->_appEmulation->startEnvironmentEmulation($storeId);
+
+        try {
+            // Retrieve specified view block from appropriate design package (depends on emulated store)
+            $paymentBlock = $this->getInfoBlock($info);
+            $paymentBlock->setArea(\Magento\Framework\App\Area::AREA_FRONTEND)
+                ->setIsSecureMode(true);
+            $paymentBlock->getMethod()
+                ->setStore($storeId);
+            $paymentBlockHtml = $paymentBlock->toHtml();
+        } catch (\Exception $exception) {
+            $this->_appEmulation->stopEnvironmentEmulation();
+            throw $exception;
+        }
+
+        $this->_appEmulation->stopEnvironmentEmulation();
+
+        return $paymentBlockHtml;
+    }
+
+    /**
+     * Retrieve all payment methods
+     *
+     * @return array
+     */
+    public function getPaymentMethods()
+    {
+        return $this->_initialConfig->getData('default')[self::XML_PATH_PAYMENT_METHODS];
+    }
+
+    /**
+     * Retrieve all payment methods list as an array
+     *
+     * Possible output:
+     * 1) assoc array as <code> => <title>
+     * 2) array of array('label' => <title>, 'value' => <code>)
+     * 3) array of array(
+     *                 array('value' => <code>, 'label' => <title>),
+     *                 array('value' => array(
+     *                     'value' => array(array(<code1> => <title1>, <code2> =>...),
+     *                     'label' => <group name>
+     *                 )),
+     *                 array('value' => <code>, 'label' => <title>),
+     *                 ...
+     *             )
+     *
+     * @param bool $sorted
+     * @param bool $asLabelValue
+     * @param bool $withGroups
+     * @param Store|null $store
+     * @return array
      * @SuppressWarnings(PHPMD.CyclomaticComplexity)
      * @SuppressWarnings(PHPMD.NPathComplexity)
      */
-    protected function _createTemporaryFlatTable($storeId)
+    public function getPaymentMethodList($sorted = true, $asLabelValue = false, $withGroups = false, $store = null)
     {
-        $columns = $this->_productIndexerHelper->getFlatColumns();
+        $methods = [];
+        $groups = [];
+        $groupRelations = [];
 
-        $indexesNeed = $this->_productIndexerHelper->getFlatIndexes();
-
-        $maxIndex = $this->_config->getValue(
-            self::XML_NODE_MAX_INDEX_COUNT
-        );
-        if ($maxIndex && count($indexesNeed) > $maxIndex) {
-            throw new \Magento\Framework\Exception\LocalizedException(
-                __(
-                    'The Flat Catalog module has a limit of %2$d filterable and/or sortable attributes.'
-                    . 'Currently there are %1$d of them.'
-                    . 'Please reduce the number of filterable/sortable attributes in order to use this module',
-                    count($indexesNeed),
-                    $maxIndex
-                )
-            );
-        }
-
-        $indexKeys = [];
-        $indexProps = array_values($indexesNeed);
-        $upperPrimaryKey = strtoupper(\Magento\Framework\DB\Adapter\AdapterInterface::INDEX_TYPE_PRIMARY);
-        foreach ($indexProps as $i => $indexProp) {
-            $indexName = $this->_connection->getIndexName(
-                $this->_getTemporaryTableName($this->_productIndexerHelper->getFlatTableName($storeId)),
-                $indexProp['fields'],
-                $indexProp['type']
-            );
-            $indexProp['type'] = strtoupper($indexProp['type']);
-            if ($indexProp['type'] == $upperPrimaryKey) {
-                $indexKey = $upperPrimaryKey;
-            } else {
-                $indexKey = $indexName;
+        foreach ($this->getPaymentMethods() as $code => $data) {
+            if (!empty($data['active'])) {
+                $storedTitle = $this->getMethodInstance($code)->getConfigData('title', $store);
+                if (isset($storedTitle)) {
+                    $methods[$code] = $storedTitle;
+                } elseif (isset($data['title'])) {
+                    $methods[$code] = $data['title'];
+                }
             }
-
-            $indexProps[$i] = [
-                'KEY_NAME' => $indexName,
-                'COLUMNS_LIST' => $indexProp['fields'],
-                'INDEX_TYPE' => strtolower($indexProp['type']),
-            ];
-            $indexKeys[$i] = $indexKey;
-        }
-        $indexesNeed = array_combine($indexKeys, $indexProps);
-
-        /** @var $table \Magento\Framework\DB\Ddl\Table */
-        $table = $this->_connection->newTable(
-            $this->_getTemporaryTableName($this->_productIndexerHelper->getFlatTableName($storeId))
-        );
-        foreach ($columns as $fieldName => $fieldProp) {
-            $columnLength = isset($fieldProp['length']) ? $fieldProp['length'] : null;
-
-            $columnDefinition = [
-                'nullable' => isset($fieldProp['nullable']) ? (bool)$fieldProp['nullable'] : false,
-                'unsigned' => isset($fieldProp['unsigned']) ? (bool)$fieldProp['unsigned'] : false,
-                'default' => isset($fieldProp['default']) ? $fieldProp['default'] : false,
-                'primary' => false,
-            ];
-
-            $columnComment = isset($fieldProp['comment']) ? $fieldProp['comment'] : $fieldName;
-
-            if ($fieldName == 'created_at') {
-                $columnDefinition['nullable'] = true;
-                $columnDefinition['default'] = null;
+            if ($asLabelValue && $withGroups && isset($data['group'])) {
+                $groupRelations[$code] = $data['group'];
             }
-
-            $table->addColumn($fieldName, $fieldProp['type'], $columnLength, $columnDefinition, $columnComment);
+        }
+        if ($asLabelValue && $withGroups) {
+            $groups = $this->_paymentConfig->getGroups();
+            foreach ($groups as $code => $title) {
+                $methods[$code] = $title;
+            }
+        }
+        if ($sorted) {
+            asort($methods);
+        }
+        if ($asLabelValue) {
+            $labelValues = [];
+            foreach ($methods as $code => $title) {
+                $labelValues[$code] = [];
+            }
+            foreach ($methods as $code => $title) {
+                if (isset($groups[$code])) {
+                    $labelValues[$code]['label'] = $title;
+                    if (!isset($labelValues[$code]['value'])) {
+                        $labelValues[$code]['value'] = null;
+                    }
+                } elseif (isset($groupRelations[$code])) {
+                    unset($labelValues[$code]);
+                    $labelValues[$groupRelations[$code]]['value'][$code] = ['value' => $code, 'label' => $title];
+                } else {
+                    $labelValues[$code] = ['value' => $code, 'label' => $title];
+                }
+            }
+            return $labelValues;
         }
 
-        foreach ($indexesNeed as $indexProp) {
-            $table->addIndex(
-                $indexProp['KEY_NAME'],
-                $indexProp['COLUMNS_LIST'],
-                ['type' => $indexProp['INDEX_TYPE']]
-            );
-        }
-
-        $table->setComment("Catalog Product Flat (Store {$storeId})");
-
-        $this->_connection->dropTable(
-            $this->_getTemporaryTableName($this->_productIndexerHelper->getFlatTableName($storeId))
-        );
-        $this->_connection->createTable($table);
+        return $methods;
     }
 
     /**
-     * Fill temporary flat table by data from temporary flat table parts
+     * Returns value of Zero Subtotal Checkout / Enabled
      *
-     * @param array $tables
-     * @param int|string $storeId
-     * @param string $valueFieldSuffix
-     * @return void
+     * @param null|string|bool|int|Store $store
+     * @return bool
      */
-    protected function _fillTemporaryFlatTable(array $tables, $storeId, $valueFieldSuffix)
+    public function isZeroSubTotal($store = null)
     {
-        $linkField = $this->getMetadataPool()->getMetadata(ProductInterface::class)->getLinkField();
-        $select = $this->_connection->select();
-        $temporaryFlatTableName = $this->_getTemporaryTableName(
-            $this->_productIndexerHelper->getFlatTableName($storeId)
+        return $this->scopeConfig->getValue(
+            \Magento\Payment\Model\Method\Free::XML_PATH_PAYMENT_FREE_ACTIVE,
+            \Magento\Store\Model\ScopeInterface::SCOPE_STORE,
+            $store
         );
-        $flatColumns = $this->_productIndexerHelper->getFlatColumns();
-        $entityTableName = $this->_productIndexerHelper->getTable('catalog_product_entity');
-        $entityTemporaryTableName = $this->_getTemporaryTableName($entityTableName);
-        $columnsList = array_keys($tables[$entityTableName]);
-        $websiteId = (int)$this->_storeManager->getStore($storeId)->getWebsiteId();
-
-        unset($tables[$entityTableName]);
-
-        $allColumns = array_values(
-            array_unique(
-                array_merge(['entity_id', $linkField, 'type_id', 'attribute_set_id'], $columnsList)
-            )
-        );
-
-        /* @var $status \Magento\Eav\Model\Entity\Attribute */
-        $status = $this->_productIndexerHelper->getAttribute('status');
-        $statusTable = $this->_getTemporaryTableName($status->getBackendTable());
-        $statusConditions = [
-            sprintf('e.%s = dstatus.%s', $linkField, $linkField),
-            'dstatus.store_id = ' . (int)$storeId,
-            'dstatus.attribute_id = ' . (int)$status->getId(),
-        ];
-        $statusExpression = $this->_connection->getIfNullSql(
-            'dstatus.value',
-            $this->_connection->quoteIdentifier("{$statusTable}.status")
-        );
-
-        $select->from(
-            ['et' => $entityTemporaryTableName],
-            $allColumns
-        )->joinInner(
-            ['e' => $this->resource->getTableName('catalog_product_entity')],
-            'e.entity_id = et.entity_id',
-            []
-        )->joinInner(
-            ['wp' => $this->_productIndexerHelper->getTable('catalog_product_website')],
-            'wp.product_id = e.entity_id AND wp.website_id = ' . $websiteId,
-            []
-        )->joinLeft(
-            ['dstatus' => $status->getBackend()->getTable()],
-            implode(' AND ', $statusConditions),
-            []
-        )->where(
-            $statusExpression . ' = ' . \Magento\Catalog\Model\Product\Attribute\Source\Status::STATUS_ENABLED
-        );
-
-        foreach ($tables as $tableName => $columns) {
-            $columnValueNames = [];
-            $temporaryTableName = $this->_getTemporaryTableName($tableName);
-            $temporaryValueTableName = $temporaryTableName . $valueFieldSuffix;
-            $columnsNames = array_keys($columns);
-
-            $select->joinLeft(
-                $temporaryTableName,
-                sprintf('e.%1$s = %2$s.%1$s', $linkField, $temporaryTableName),
-                $columnsNames
-            );
-            $allColumns = array_merge($allColumns, $columnsNames);
-
-            foreach ($columnsNames as $name) {
-                $columnValueName = $name . $valueFieldSuffix;
-                if (isset($flatColumns[$columnValueName])) {
-                    $columnValueNames[] = $columnValueName;
-                }
-            }
-            if (!empty($columnValueNames)) {
-                $select->joinLeft(
-                    $temporaryValueTableName,
-                    sprintf('e.%1$s = %2$s.%1$s', $linkField, $temporaryValueTableName),
-                    $columnValueNames
-                );
-                $allColumns = array_merge($allColumns, $columnValueNames);
-            }
-        }
-        $sql = $select->insertFromSelect($temporaryFlatTableName, $allColumns, false);
-        $this->_connection->query($sql);
     }
 
     /**
-     * Apply diff. between 0 store and current store to temporary flat table
+     * Returns value of Zero Subtotal Checkout / New Order Status
      *
-     * @param array $tables
-     * @param array $changedIds
-     * @param int|string $storeId
-     * @param string $valueFieldSuffix
-     * @return void
-     */
-    protected function _updateTemporaryTableByStoreValues(
-        array $tables,
-        array $changedIds,
-        $storeId,
-        $valueFieldSuffix
-    ) {
-        $flatColumns = $this->_productIndexerHelper->getFlatColumns();
-        $temporaryFlatTableName = $this->_getTemporaryTableName(
-            $this->_productIndexerHelper->getFlatTableName($storeId)
-        );
-        $linkField = $this->getMetadataPool()->getMetadata(ProductInterface::class)->getLinkField();
-        foreach ($tables as $tableName => $columns) {
-            foreach ($columns as $attribute) {
-                /* @var $attribute \Magento\Eav\Model\Entity\Attribute */
-                $attributeCode = $attribute->getAttributeCode();
-                if ($attribute->getBackend()->getType() != 'static') {
-                    $joinCondition = sprintf('t.%s = e.%s', $linkField, $linkField) .
-                        ' AND t.attribute_id=' .
-                        $attribute->getId() .
-                        ' AND t.store_id = ' .
-                        $storeId .
-                        ' AND t.value IS NOT NULL';
-                    /** @var $select \Magento\Framework\DB\Select */
-                    $select = $this->_connection->select()
-                        ->joinInner(
-                            ['e' => $this->resource->getTableName('catalog_product_entity')],
-                            'e.entity_id = et.entity_id',
-                            []
-                        )->joinInner(
-                            ['t' => $tableName],
-                            $joinCondition,
-                            [$attributeCode => 't.value']
-                        );
-                    if (!empty($changedIds)) {
-                        $select->where($this->_connection->quoteInto('et.entity_id IN (?)', $changedIds));
-                    }
-
-                    /*
-                     * According to \Magento\Framework\DB\SelectRendererInterface select rendering may be updated
-                     * so we need to trigger select renderer for correct update
-                     */
-                    $select->assemble();
-                    $sql = $select->crossUpdateFromSelect(['et' => $temporaryFlatTableName]);
-                    $this->_connection->query($sql);
-                }
-
-                //Update not simple attributes (eg. dropdown)
-                $columnName = $attributeCode . $valueFieldSuffix;
-                if (isset($flatColumns[$columnName])) {
-                    $select = $this->_connection->select();
-                    $select->joinLeft(
-                        ['t0' => $this->_productIndexerHelper->getTable('eav_attribute_option_value')],
-                        't0.option_id = et.' . $attributeCode . ' AND t0.store_id = 0',
-                        []
-                    )->joinLeft(
-                        ['ts' => $this->_productIndexerHelper->getTable('eav_attribute_option_value')],
-                        'ts.option_id = et.' . $attributeCode . ' AND ts.store_id = ' . $storeId,
-                        []
-                    )->columns(
-                        [$columnName => $this->_connection->getIfNullSql('ts.value', 't0.value')]
-                    )->where($attributeCode . ' IS NOT NULL');
-                    if (!empty($changedIds)) {
-                        $select->where($this->_connection->quoteInto('et.entity_id IN (?)', $changedIds));
-                    }
-                    $select->assemble();
-                    $sql = $select->crossUpdateFromSelect(['et' => $temporaryFlatTableName]);
-                    $this->_connection->query($sql);
-                }
-            }
-        }
-    }
-
-    /**
-     * Retrieve temporary table name by regular table name
-     *
-     * @param string $tableName
+     * @param null|string|bool|int|Store $store
      * @return string
      */
-    protected function _getTemporaryTableName($tableName)
+    public function getZeroSubTotalOrderStatus($store = null)
     {
-        return sprintf('%s_tmp_indexer', $tableName);
+        return $this->scopeConfig->getValue(
+            \Magento\Payment\Model\Method\Free::XML_PATH_PAYMENT_FREE_ORDER_STATUS,
+            \Magento\Store\Model\ScopeInterface::SCOPE_STORE,
+            $store
+        );
     }
 
     /**
-     * Get MetadataPool
+     * Returns value of Zero Subtotal Checkout / Automatically Invoice All Items
      *
-     * @return \Magento\Framework\EntityManager\MetadataPool
+     * @param null|string|bool|int|Store $store
+     * @return string
      */
-    private function getMetadataPool()
+    public function getZeroSubTotalPaymentAutomaticInvoice($store = null)
     {
-        if (null === $this->metadataPool) {
-            $this->metadataPool = \Magento\Framework\App\ObjectManager::getInstance()
-                ->get(\Magento\Framework\EntityManager\MetadataPool::class);
-        }
-        return $this->metadataPool;
+        return $this->scopeConfig->getValue(
+            \Magento\Payment\Model\Method\Free::XML_PATH_PAYMENT_FREE_PAYMENT_ACTION,
+            \Magento\Store\Model\ScopeInterface::SCOPE_STORE,
+            $store
+        );
     }
 }
