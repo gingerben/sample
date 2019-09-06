@@ -171,7 +171,7 @@ class ItemRepository implements OrderItemRepositoryInterface
             $request = $this->getBuyRequest($entity);
             $productOptions = $entity->getProductOptions();
             $productOptions['info_buyRequest'] = $request->toArray();
-            $entity->setProductOptions($productOptions);
+            //$entity->setProductOptions($productOptions);
         }
         $this->metadata->getMapper()->save($entity);
         $this->registry[$entity->getEntityId()] = $entity;
