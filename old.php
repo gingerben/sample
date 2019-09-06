@@ -3,351 +3,232 @@
  * Copyright © Magento, Inc. All rights reserved.
  * See COPYING.txt for license details.
  */
-namespace Magento\Payment\Helper;
 
-use Magento\Quote\Model\Quote;
-use Magento\Store\Model\Store;
-use Magento\Payment\Block\Form;
-use Magento\Payment\Model\InfoInterface;
-use Magento\Framework\View\Element\Template;
-use Magento\Framework\View\LayoutInterface;
-use Magento\Framework\View\LayoutFactory;
-use Magento\Payment\Model\Method\AbstractMethod;
-use Magento\Payment\Model\MethodInterface;
+namespace Magento\Sales\Model\Order;
+
+use Magento\Catalog\Model\ProductOptionProcessorInterface;
+use Magento\Framework\Api\SearchCriteria\CollectionProcessorInterface;
+use Magento\Framework\Api\SearchCriteriaInterface;
+use Magento\Framework\DataObject;
+use Magento\Framework\DataObject\Factory as DataObjectFactory;
+use Magento\Framework\Exception\InputException;
+use Magento\Framework\Exception\NoSuchEntityException;
+use Magento\Sales\Api\Data\OrderItemInterface;
+use Magento\Sales\Api\Data\OrderItemSearchResultInterfaceFactory;
+use Magento\Sales\Api\OrderItemRepositoryInterface;
+use Magento\Sales\Model\Order\ProductOption;
+use Magento\Sales\Model\ResourceModel\Metadata;
 
 /**
- * Payment module base helper
+ * Repository class for @see OrderItemInterface
  * @SuppressWarnings(PHPMD.CouplingBetweenObjects)
- *
- * @api
- * @since 100.0.2
  */
-class Data extends \Magento\Framework\App\Helper\AbstractHelper
+class ItemRepository implements OrderItemRepositoryInterface
 {
-    const XML_PATH_PAYMENT_METHODS = 'payment';
-
     /**
-     * @var \Magento\Payment\Model\Config
+     * @var DataObjectFactory
      */
-    protected $_paymentConfig;
+    protected $objectFactory;
 
     /**
-     * Layout
-     *
-     * @var \Magento\Framework\View\LayoutInterface
+     * @var Metadata
      */
-    protected $_layout;
+    protected $metadata;
 
     /**
-     * Factory for payment method models
-     *
-     * @var \Magento\Payment\Model\Method\Factory
+     * @var OrderItemSearchResultInterfaceFactory
      */
-    protected $_methodFactory;
+    protected $searchResultFactory;
 
     /**
-     * App emulation model
-     *
-     * @var \Magento\Store\Model\App\Emulation
+     * @var ProductOptionProcessorInterface[]
      */
-    protected $_appEmulation;
+    protected $processorPool;
 
     /**
-     * @var \Magento\Framework\App\Config\Initial
+     * @var OrderItemInterface[]
      */
-    protected $_initialConfig;
+    protected $registry = [];
 
     /**
-     * Construct
-     *
-     * @param \Magento\Framework\App\Helper\Context $context
-     * @param LayoutFactory $layoutFactory
-     * @param \Magento\Payment\Model\Method\Factory $paymentMethodFactory
-     * @param \Magento\Store\Model\App\Emulation $appEmulation
-     * @param \Magento\Payment\Model\Config $paymentConfig
-     * @param \Magento\Framework\App\Config\Initial $initialConfig
+     * @var CollectionProcessorInterface
+     */
+    private $collectionProcessor;
+
+    /**
+     * @var ProductOption
+     */
+    private $productOption;
+
+    /**
+     * @param DataObjectFactory $objectFactory
+     * @param Metadata $metadata
+     * @param OrderItemSearchResultInterfaceFactory $searchResultFactory
+     * @param CollectionProcessorInterface $collectionProcessor
+     * @param ProductOption $productOption
+     * @param array $processorPool
      */
     public function __construct(
-        \Magento\Framework\App\Helper\Context $context,
-        LayoutFactory $layoutFactory,
-        \Magento\Payment\Model\Method\Factory $paymentMethodFactory,
-        \Magento\Store\Model\App\Emulation $appEmulation,
-        \Magento\Payment\Model\Config $paymentConfig,
-        \Magento\Framework\App\Config\Initial $initialConfig
+        DataObjectFactory $objectFactory,
+        Metadata $metadata,
+        OrderItemSearchResultInterfaceFactory $searchResultFactory,
+        CollectionProcessorInterface $collectionProcessor,
+        ProductOption $productOption,
+        array $processorPool = []
     ) {
-        parent::__construct($context);
-        $this->_layout = $layoutFactory->create();
-        $this->_methodFactory = $paymentMethodFactory;
-        $this->_appEmulation = $appEmulation;
-        $this->_paymentConfig = $paymentConfig;
-        $this->_initialConfig = $initialConfig;
+        $this->objectFactory = $objectFactory;
+        $this->metadata = $metadata;
+        $this->searchResultFactory = $searchResultFactory;
+        $this->collectionProcessor = $collectionProcessor;
+        $this->productOption = $productOption;
+        $this->processorPool = $processorPool;
     }
 
     /**
-     * Get config name of method model
+     * Loads entity.
      *
-     * @param string $code
-     * @return string
+     * @param int $id
+     * @return OrderItemInterface
+     * @throws InputException
+     * @throws NoSuchEntityException
      */
-    protected function getMethodModelConfigName($code)
+    public function get($id)
     {
-        return sprintf('%s/%s/model', self::XML_PATH_PAYMENT_METHODS, $code);
+        if (!$id) {
+            throw new InputException(__('An ID is needed. Set the ID and try again.'));
+        }
+        if (!isset($this->registry[$id])) {
+            /** @var OrderItemInterface $orderItem */
+            $orderItem = $this->metadata->getNewInstance()->load($id);
+            if (!$orderItem->getItemId()) {
+                throw new NoSuchEntityException(
+                    __("The entity that was requested doesn't exist. Verify the entity and try again.")
+                );
+            }
+
+            $this->productOption->add($orderItem);
+            $this->addParentItem($orderItem);
+            $this->registry[$id] = $orderItem;
+        }
+        return $this->registry[$id];
     }
 
     /**
-     * Retrieve method model object
+     * Find entities by criteria
      *
-     * @param string $code
-     *
-     * @throws \Magento\Framework\Exception\LocalizedException
-     * @return MethodInterface
+     * @param SearchCriteriaInterface $searchCriteria
+     * @return OrderItemInterface[]
      */
-    public function getMethodInstance($code)
+    public function getList(SearchCriteriaInterface $searchCriteria)
     {
-        $class = $this->scopeConfig->getValue(
-            $this->getMethodModelConfigName($code),
-            \Magento\Store\Model\ScopeInterface::SCOPE_STORE
-        );
-
-        if (!$class) {
-            throw new \UnexpectedValueException('Payment model name is not provided in config!');
+        /** @var \Magento\Sales\Model\ResourceModel\Order\Item\Collection $searchResult */
+        $searchResult = $this->searchResultFactory->create();
+        $searchResult->setSearchCriteria($searchCriteria);
+        $this->collectionProcessor->process($searchCriteria, $searchResult);
+        /** @var OrderItemInterface $orderItem */
+        foreach ($searchResult->getItems() as $orderItem) {
+            $this->productOption->add($orderItem);
         }
 
-        return $this->_methodFactory->create($class);
+        return $searchResult;
     }
 
     /**
-     * Get and sort available payment methods for specified or current store
+     * Register entity to delete
      *
-     * @param null|string|bool|int $store
-     * @param Quote|null $quote
-     * @return AbstractMethod[]
-     * @deprecated 100.1.3
-     * @see \Magento\Payment\Api\PaymentMethodListInterface
-     */
-    public function getStoreMethods($store = null, $quote = null)
-    {
-        $res = [];
-        $methods = $this->getPaymentMethods();
-
-        foreach (array_keys($methods) as $code) {
-            $model = $this->scopeConfig->getValue(
-                $this->getMethodModelConfigName($code),
-                \Magento\Store\Model\ScopeInterface::SCOPE_STORE,
-                $store
-            );
-            if (!$model) {
-                continue;
-            }
-
-            /** @var AbstractMethod $methodInstance */
-            $methodInstance = $this->_methodFactory->create($model);
-            $methodInstance->setStore($store);
-            if (!$methodInstance->isAvailable($quote)) {
-                /* if the payment method cannot be used at this time */
-                continue;
-            }
-            $res[] = $methodInstance;
-        }
-
-        @uasort(
-            $res,
-            function (MethodInterface $a, MethodInterface $b) {
-                return (int)$a->getConfigData('sort_order') <=> (int)$b->getConfigData('sort_order');
-            }
-        );
-
-        return $res;
-    }
-
-    /**
-     * Retrieve payment method form html
-     *
-     * @param MethodInterface $method
-     * @param LayoutInterface $layout
-     * @return Form
-     */
-    public function getMethodFormBlock(MethodInterface $method, LayoutInterface $layout)
-    {
-        $block = $layout->createBlock($method->getFormBlockType(), $method->getCode());
-        $block->setMethod($method);
-        return $block;
-    }
-
-    /**
-     * Retrieve payment information block
-     *
-     * @param InfoInterface $info
-     * @param \Magento\Framework\View\LayoutInterface $layout
-     * @return Template
-     */
-    public function getInfoBlock(InfoInterface $info, LayoutInterface $layout = null)
-    {
-        $layout = $layout ?: $this->_layout;
-        $blockType = $info->getMethodInstance()->getInfoBlockType();
-        $block = $layout->createBlock($blockType);
-        $block->setInfo($info);
-        return $block;
-    }
-
-    /**
-     * Render payment information block
-     *
-     * @param InfoInterface $info
-     * @param int $storeId
-     * @return string
-     * @throws \Exception
-     */
-    public function getInfoBlockHtml(InfoInterface $info, $storeId)
-    {
-        $this->_appEmulation->startEnvironmentEmulation($storeId);
-
-        try {
-            // Retrieve specified view block from appropriate design package (depends on emulated store)
-            $paymentBlock = $this->getInfoBlock($info);
-            $paymentBlock->setArea(\Magento\Framework\App\Area::AREA_FRONTEND)
-                ->setIsSecureMode(true);
-            $paymentBlock->getMethod()
-                ->setStore($storeId);
-            $paymentBlockHtml = $paymentBlock->toHtml();
-        } catch (\Exception $exception) {
-            $this->_appEmulation->stopEnvironmentEmulation();
-            throw $exception;
-        }
-
-        $this->_appEmulation->stopEnvironmentEmulation();
-
-        return $paymentBlockHtml;
-    }
-
-    /**
-     * Retrieve all payment methods
-     *
-     * @return array
-     */
-    public function getPaymentMethods()
-    {
-        return $this->_initialConfig->getData('default')[self::XML_PATH_PAYMENT_METHODS];
-    }
-
-    /**
-     * Retrieve all payment methods list as an array
-     *
-     * Possible output:
-     * 1) assoc array as <code> => <title>
-     * 2) array of array('label' => <title>, 'value' => <code>)
-     * 3) array of array(
-     *                 array('value' => <code>, 'label' => <title>),
-     *                 array('value' => array(
-     *                     'value' => array(array(<code1> => <title1>, <code2> =>...),
-     *                     'label' => <group name>
-     *                 )),
-     *                 array('value' => <code>, 'label' => <title>),
-     *                 ...
-     *             )
-     *
-     * @param bool $sorted
-     * @param bool $asLabelValue
-     * @param bool $withGroups
-     * @param Store|null $store
-     * @return array
-     * @SuppressWarnings(PHPMD.CyclomaticComplexity)
-     * @SuppressWarnings(PHPMD.NPathComplexity)
-     */
-    public function getPaymentMethodList($sorted = true, $asLabelValue = false, $withGroups = false, $store = null)
-    {
-        $methods = [];
-        $groups = [];
-        $groupRelations = [];
-
-        foreach ($this->getPaymentMethods() as $code => $data) {
-            
-            $storedTitle = $this->getMethodInstance($code)->getConfigData('title', $store);
-            if (isset($storedTitle)) {
-                $methods[$code] = $storedTitle;
-            } elseif (isset($data['title'])) {
-                $methods[$code] = $data['title'];
-            }
-
-            if ($asLabelValue && $withGroups && isset($data['group'])) {
-                $groupRelations[$code] = $data['group'];
-            }
-        }
-        if ($asLabelValue && $withGroups) {
-            $groups = $this->_paymentConfig->getGroups();
-            foreach ($groups as $code => $title) {
-                $methods[$code] = $title;
-            }
-        }
-        if ($sorted) {
-            asort($methods);
-        }
-        if ($asLabelValue) {
-            $labelValues = [];
-            foreach ($methods as $code => $title) {
-                $labelValues[$code] = [];
-            }
-            foreach ($methods as $code => $title) {
-                if (isset($groups[$code])) {
-                    $labelValues[$code]['label'] = $title;
-                    if (!isset($labelValues[$code]['value'])) {
-                        $labelValues[$code]['value'] = null;
-                    }
-                } elseif (isset($groupRelations[$code])) {
-                    unset($labelValues[$code]);
-                    $labelValues[$groupRelations[$code]]['value'][$code] = ['value' => $code, 'label' => $title];
-                } else {
-                    $labelValues[$code] = ['value' => $code, 'label' => $title];
-                }
-            }
-            return $labelValues;
-        }
-
-        return $methods;
-    }
-
-    /**
-     * Returns value of Zero Subtotal Checkout / Enabled
-     *
-     * @param null|string|bool|int|Store $store
+     * @param OrderItemInterface $entity
      * @return bool
      */
-    public function isZeroSubTotal($store = null)
+    public function delete(OrderItemInterface $entity)
     {
-        return $this->scopeConfig->getValue(
-            \Magento\Payment\Model\Method\Free::XML_PATH_PAYMENT_FREE_ACTIVE,
-            \Magento\Store\Model\ScopeInterface::SCOPE_STORE,
-            $store
-        );
+        $this->metadata->getMapper()->delete($entity);
+        unset($this->registry[$entity->getEntityId()]);
+        return true;
     }
 
     /**
-     * Returns value of Zero Subtotal Checkout / New Order Status
+     * Delete entity by Id
      *
-     * @param null|string|bool|int|Store $store
-     * @return string
+     * @param int $id
+     * @return bool
      */
-    public function getZeroSubTotalOrderStatus($store = null)
+    public function deleteById($id)
     {
-        return $this->scopeConfig->getValue(
-            \Magento\Payment\Model\Method\Free::XML_PATH_PAYMENT_FREE_ORDER_STATUS,
-            \Magento\Store\Model\ScopeInterface::SCOPE_STORE,
-            $store
-        );
+        $entity = $this->get($id);
+        return $this->delete($entity);
     }
 
     /**
-     * Returns value of Zero Subtotal Checkout / Automatically Invoice All Items
+     * Perform persist operations for one entity
      *
-     * @param null|string|bool|int|Store $store
-     * @return string
+     * @param OrderItemInterface $entity
+     * @return OrderItemInterface
      */
-    public function getZeroSubTotalPaymentAutomaticInvoice($store = null)
+    public function save(OrderItemInterface $entity)
     {
-        return $this->scopeConfig->getValue(
-            \Magento\Payment\Model\Method\Free::XML_PATH_PAYMENT_FREE_PAYMENT_ACTION,
-            \Magento\Store\Model\ScopeInterface::SCOPE_STORE,
-            $store
-        );
+
+        if ($entity->getProductOption()) {
+            $request = $this->getBuyRequest($entity);
+            $productOptions = $entity->getProductOptions();
+            $productOptions['info_buyRequest'] = $request->toArray();
+            $entity->setProductOptions($productOptions);
+        }
+        $this->metadata->getMapper()->save($entity);
+        $this->registry[$entity->getEntityId()] = $entity;
+        return $this->registry[$entity->getEntityId()];
+    }
+
+    /**
+     * Set parent item.
+     *
+     * @param OrderItemInterface $orderItem
+     * @throws InputException
+     * @throws NoSuchEntityException
+     */
+    private function addParentItem(OrderItemInterface $orderItem)
+    {
+        if ($parentId = $orderItem->getParentItemId()) {
+            $orderItem->setParentItem($this->get($parentId));
+        } else {
+            $orderCollection = $orderItem->getOrder()->getItemsCollection()->filterByParent($orderItem->getItemId());
+
+            foreach ($orderCollection->getItems() as $item) {
+                if ($item->getParentItemId() === $orderItem->getItemId()) {
+                    $item->setParentItem($orderItem);
+                }
+            }
+        }
+    }
+
+    /**
+     * Retrieve order item's buy request
+     *
+     * @param OrderItemInterface $entity
+     * @return DataObject
+     */
+    protected function getBuyRequest(OrderItemInterface $entity)
+    {
+        $request = $this->objectFactory->create(['qty' => $entity->getQtyOrdered()]);
+
+        $productType = $entity->getProductType();
+        if (isset($this->processorPool[$productType])
+            && !$entity->getParentItemId()) {
+            $productOption = $entity->getProductOption();
+            if ($productOption) {
+                $requestUpdate = $this->processorPool[$productType]->convertToBuyRequest($productOption);
+                $request->addData($requestUpdate->getData());
+            }
+        }
+
+        if (isset($this->processorPool['custom_options'])
+            && !$entity->getParentItemId()) {
+            $productOption = $entity->getProductOption();
+            if ($productOption) {
+                $requestUpdate = $this->processorPool['custom_options']->convertToBuyRequest($productOption);
+                $request->addData($requestUpdate->getData());
+            }
+        }
+
+        return $request;
     }
 }
