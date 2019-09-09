@@ -108,6 +108,8 @@ class GuestPaymentInformationManagement implements \Magento\Checkout\Api\GuestPa
             try {
                 $orderId = $this->cartManagement->placeOrder($cartId);
             } catch (\Magento\Framework\Exception\LocalizedException $e) {
+                $this->getLogger()->critical('Place order Try Catch');
+                $this->getLogger()->critical($e);
                 throw new CouldNotSaveException(
                     __($e->getMessage()),
                     $e
@@ -124,6 +126,8 @@ class GuestPaymentInformationManagement implements \Magento\Checkout\Api\GuestPa
         } catch (\Exception $e) {
             $salesConnection->rollBack();
             $checkoutConnection->rollBack();
+            $this->getLogger()->critical('potential duplicate payment alert');
+            $this->getLogger()->critical($e);
             throw $e;
         }
 
@@ -142,7 +146,8 @@ class GuestPaymentInformationManagement implements \Magento\Checkout\Api\GuestPa
         $quoteIdMask = $this->quoteIdMaskFactory->create()->load($cartId, 'masked_id');
         /** @var Quote $quote */
         $quote = $this->cartRepository->getActive($quoteIdMask->getQuoteId());
-
+        $this->getLogger()->critical($quote->getShippingAddress()->getId());
+        $this->getLogger()->critical('shipping address ',$quote->getShippingAddress()->getData());
         if ($billingAddress) {
             $billingAddress->setEmail($email);
             $quote->removeAddress($quote->getBillingAddress()->getId());
