@@ -81,20 +81,25 @@ class PaymentInformationManagement implements \Magento\Checkout\Api\PaymentInfor
         \Magento\Quote\Api\Data\PaymentInterface $paymentMethod,
         \Magento\Quote\Api\Data\AddressInterface $billingAddress = null
     ) {
-        $this->savePaymentInformation($cartId, $paymentMethod, $billingAddress);
         try {
-            $orderId = $this->cartManagement->placeOrder($cartId);
-        } catch (\Magento\Framework\Exception\LocalizedException $e) {
-            throw new CouldNotSaveException(
-                __($e->getMessage()),
-                $e
-            );
+            $this->savePaymentInformation($cartId, $paymentMethod, $billingAddress);
+            try {
+                $orderId = $this->cartManagement->placeOrder($cartId);
+            } catch (\Magento\Framework\Exception\LocalizedException $e) {
+                throw new CouldNotSaveException(
+                    __($e->getMessage()),
+                    $e
+                );
+            } catch (\Exception $e) {
+                $this->getLogger()->critical($e);
+                throw new CouldNotSaveException(
+                    __('A server error stopped your order from being placed. Please try to place your order again.'),
+                    $e
+                );
+            }
         } catch (\Exception $e) {
+            $this->getLogger()->critical('potential duplicate payment alert');
             $this->getLogger()->critical($e);
-            throw new CouldNotSaveException(
-                __('A server error stopped your order from being placed. Please try to place your order again.'),
-                $e
-            );
         }
         return $orderId;
     }
@@ -112,6 +117,8 @@ class PaymentInformationManagement implements \Magento\Checkout\Api\PaymentInfor
             $quoteRepository = $this->getCartRepository();
             /** @var \Magento\Quote\Model\Quote $quote */
             $quote = $quoteRepository->getActive($cartId);
+            $this->getLogger()->critical($quote->getShippingAddress()->getId());
+            $this->getLogger()->critical('shipping address ',$quote->getShippingAddress()->getData());
             $quote->removeAddress($quote->getBillingAddress()->getId());
             $quote->setBillingAddress($billingAddress);
             $quote->setDataChanges(true);
