@@ -3,232 +3,197 @@
  * Copyright © Magento, Inc. All rights reserved.
  * See COPYING.txt for license details.
  */
+declare(strict_types=1);
 
-namespace Magento\Sales\Model\Order;
+namespace Magento\Checkout\Model;
 
-use Magento\Catalog\Model\ProductOptionProcessorInterface;
-use Magento\Framework\Api\SearchCriteria\CollectionProcessorInterface;
-use Magento\Framework\Api\SearchCriteriaInterface;
-use Magento\Framework\DataObject;
-use Magento\Framework\DataObject\Factory as DataObjectFactory;
-use Magento\Framework\Exception\InputException;
-use Magento\Framework\Exception\NoSuchEntityException;
-use Magento\Sales\Api\Data\OrderItemInterface;
-use Magento\Sales\Api\Data\OrderItemSearchResultInterfaceFactory;
-use Magento\Sales\Api\OrderItemRepositoryInterface;
-use Magento\Sales\Model\Order\ProductOption;
-use Magento\Sales\Model\ResourceModel\Metadata;
+use Magento\Framework\App\ObjectManager;
+use Magento\Framework\App\ResourceConnection;
+use Magento\Quote\Api\CartRepositoryInterface;
+use Magento\Framework\Exception\CouldNotSaveException;
+use Magento\Quote\Model\Quote;
 
 /**
- * Repository class for @see OrderItemInterface
+ * Guest payment information management model.
+ *
  * @SuppressWarnings(PHPMD.CouplingBetweenObjects)
  */
-class ItemRepository implements OrderItemRepositoryInterface
+class GuestPaymentInformationManagement implements \Magento\Checkout\Api\GuestPaymentInformationManagementInterface
 {
-    /**
-     * @var DataObjectFactory
-     */
-    protected $objectFactory;
 
     /**
-     * @var Metadata
+     * @var \Magento\Quote\Api\GuestBillingAddressManagementInterface
      */
-    protected $metadata;
+    protected $billingAddressManagement;
 
     /**
-     * @var OrderItemSearchResultInterfaceFactory
+     * @var \Magento\Quote\Api\GuestPaymentMethodManagementInterface
      */
-    protected $searchResultFactory;
+    protected $paymentMethodManagement;
 
     /**
-     * @var ProductOptionProcessorInterface[]
+     * @var \Magento\Quote\Api\GuestCartManagementInterface
      */
-    protected $processorPool;
+    protected $cartManagement;
 
     /**
-     * @var OrderItemInterface[]
+     * @var \Magento\Checkout\Api\PaymentInformationManagementInterface
      */
-    protected $registry = [];
+    protected $paymentInformationManagement;
 
     /**
-     * @var CollectionProcessorInterface
+     * @var \Magento\Quote\Model\QuoteIdMaskFactory
      */
-    private $collectionProcessor;
+    protected $quoteIdMaskFactory;
 
     /**
-     * @var ProductOption
+     * @var CartRepositoryInterface
      */
-    private $productOption;
+    protected $cartRepository;
 
     /**
-     * @param DataObjectFactory $objectFactory
-     * @param Metadata $metadata
-     * @param OrderItemSearchResultInterfaceFactory $searchResultFactory
-     * @param CollectionProcessorInterface $collectionProcessor
-     * @param ProductOption $productOption
-     * @param array $processorPool
+     * @var \Psr\Log\LoggerInterface
+     */
+    private $logger;
+
+    /**
+     * @var ResourceConnection
+     */
+    private $connectionPool;
+
+    /**
+     * @param \Magento\Quote\Api\GuestBillingAddressManagementInterface $billingAddressManagement
+     * @param \Magento\Quote\Api\GuestPaymentMethodManagementInterface $paymentMethodManagement
+     * @param \Magento\Quote\Api\GuestCartManagementInterface $cartManagement
+     * @param \Magento\Checkout\Api\PaymentInformationManagementInterface $paymentInformationManagement
+     * @param \Magento\Quote\Model\QuoteIdMaskFactory $quoteIdMaskFactory
+     * @param CartRepositoryInterface $cartRepository
+     * @param ResourceConnection $connectionPool
+     * @codeCoverageIgnore
      */
     public function __construct(
-        DataObjectFactory $objectFactory,
-        Metadata $metadata,
-        OrderItemSearchResultInterfaceFactory $searchResultFactory,
-        CollectionProcessorInterface $collectionProcessor,
-        ProductOption $productOption,
-        array $processorPool = []
+        \Magento\Quote\Api\GuestBillingAddressManagementInterface $billingAddressManagement,
+        \Magento\Quote\Api\GuestPaymentMethodManagementInterface $paymentMethodManagement,
+        \Magento\Quote\Api\GuestCartManagementInterface $cartManagement,
+        \Magento\Checkout\Api\PaymentInformationManagementInterface $paymentInformationManagement,
+        \Magento\Quote\Model\QuoteIdMaskFactory $quoteIdMaskFactory,
+        CartRepositoryInterface $cartRepository,
+        ResourceConnection $connectionPool = null
     ) {
-        $this->objectFactory = $objectFactory;
-        $this->metadata = $metadata;
-        $this->searchResultFactory = $searchResultFactory;
-        $this->collectionProcessor = $collectionProcessor;
-        $this->productOption = $productOption;
-        $this->processorPool = $processorPool;
+        $this->billingAddressManagement = $billingAddressManagement;
+        $this->paymentMethodManagement = $paymentMethodManagement;
+        $this->cartManagement = $cartManagement;
+        $this->paymentInformationManagement = $paymentInformationManagement;
+        $this->quoteIdMaskFactory = $quoteIdMaskFactory;
+        $this->cartRepository = $cartRepository;
+        $this->connectionPool = $connectionPool ?: ObjectManager::getInstance()->get(ResourceConnection::class);
     }
 
     /**
-     * Loads entity.
-     *
-     * @param int $id
-     * @return OrderItemInterface
-     * @throws InputException
-     * @throws NoSuchEntityException
+     * @inheritdoc
      */
-    public function get($id)
-    {
-        if (!$id) {
-            throw new InputException(__('An ID is needed. Set the ID and try again.'));
-        }
-        if (!isset($this->registry[$id])) {
-            /** @var OrderItemInterface $orderItem */
-            $orderItem = $this->metadata->getNewInstance()->load($id);
-            if (!$orderItem->getItemId()) {
-                throw new NoSuchEntityException(
-                    __("The entity that was requested doesn't exist. Verify the entity and try again.")
+    public function savePaymentInformationAndPlaceOrder(
+        $cartId,
+        $email,
+        \Magento\Quote\Api\Data\PaymentInterface $paymentMethod,
+        \Magento\Quote\Api\Data\AddressInterface $billingAddress = null
+    ) {
+        $salesConnection = $this->connectionPool->getConnection('sales');
+        $checkoutConnection = $this->connectionPool->getConnection('checkout');
+        $salesConnection->beginTransaction();
+        $checkoutConnection->beginTransaction();
+
+        try {
+            $this->savePaymentInformation($cartId, $email, $paymentMethod, $billingAddress);
+            try {
+                $orderId = $this->cartManagement->placeOrder($cartId);
+            } catch (\Magento\Framework\Exception\LocalizedException $e) {
+                throw new CouldNotSaveException(
+                    __($e->getMessage()),
+                    $e
+                );
+            } catch (\Exception $e) {
+                $this->getLogger()->critical($e);
+                throw new CouldNotSaveException(
+                    __('An error occurred on the server. Please try to place the order again.'),
+                    $e
                 );
             }
-
-            $this->productOption->add($orderItem);
-            $this->addParentItem($orderItem);
-            $this->registry[$id] = $orderItem;
+            $salesConnection->commit();
+            $checkoutConnection->commit();
+        } catch (\Exception $e) {
+            $salesConnection->rollBack();
+            $checkoutConnection->rollBack();
+            throw $e;
         }
-        return $this->registry[$id];
+
+        return $orderId;
     }
 
     /**
-     * Find entities by criteria
-     *
-     * @param SearchCriteriaInterface $searchCriteria
-     * @return OrderItemInterface[]
+     * @inheritdoc
      */
-    public function getList(SearchCriteriaInterface $searchCriteria)
-    {
-        /** @var \Magento\Sales\Model\ResourceModel\Order\Item\Collection $searchResult */
-        $searchResult = $this->searchResultFactory->create();
-        $searchResult->setSearchCriteria($searchCriteria);
-        $this->collectionProcessor->process($searchCriteria, $searchResult);
-        /** @var OrderItemInterface $orderItem */
-        foreach ($searchResult->getItems() as $orderItem) {
-            $this->productOption->add($orderItem);
+    public function savePaymentInformation(
+        $cartId,
+        $email,
+        \Magento\Quote\Api\Data\PaymentInterface $paymentMethod,
+        \Magento\Quote\Api\Data\AddressInterface $billingAddress = null
+    ) {
+        $quoteIdMask = $this->quoteIdMaskFactory->create()->load($cartId, 'masked_id');
+        /** @var Quote $quote */
+        $quote = $this->cartRepository->getActive($quoteIdMask->getQuoteId());
+
+        if ($billingAddress) {
+            $billingAddress->setEmail($email);
+            $quote->removeAddress($quote->getBillingAddress()->getId());
+            $quote->setBillingAddress($billingAddress);
+            $quote->setDataChanges(true);
+        } else {
+            $quote->getBillingAddress()->setEmail($email);
         }
+        $this->limitShippingCarrier($quote);
 
-        return $searchResult;
-    }
-
-    /**
-     * Register entity to delete
-     *
-     * @param OrderItemInterface $entity
-     * @return bool
-     */
-    public function delete(OrderItemInterface $entity)
-    {
-        $this->metadata->getMapper()->delete($entity);
-        unset($this->registry[$entity->getEntityId()]);
+        $this->paymentMethodManagement->set($cartId, $paymentMethod);
         return true;
     }
 
     /**
-     * Delete entity by Id
-     *
-     * @param int $id
-     * @return bool
+     * @inheritdoc
      */
-    public function deleteById($id)
+    public function getPaymentInformation($cartId)
     {
-        $entity = $this->get($id);
-        return $this->delete($entity);
+        $quoteIdMask = $this->quoteIdMaskFactory->create()->load($cartId, 'masked_id');
+        return $this->paymentInformationManagement->getPaymentInformation($quoteIdMask->getQuoteId());
     }
 
     /**
-     * Perform persist operations for one entity
+     * Get logger instance
      *
-     * @param OrderItemInterface $entity
-     * @return OrderItemInterface
+     * @return \Psr\Log\LoggerInterface
+     * @deprecated 100.1.8
      */
-    public function save(OrderItemInterface $entity)
+    private function getLogger()
     {
-
-        if ($entity->getProductOption()) {
-            $request = $this->getBuyRequest($entity);
-            $productOptions = $entity->getProductOptions();
-            $productOptions['info_buyRequest'] = $request->toArray();
-            //$entity->setProductOptions($productOptions);
+        if (!$this->logger) {
+            $this->logger = \Magento\Framework\App\ObjectManager::getInstance()->get(\Psr\Log\LoggerInterface::class);
         }
-        $this->metadata->getMapper()->save($entity);
-        $this->registry[$entity->getEntityId()] = $entity;
-        return $this->registry[$entity->getEntityId()];
+        return $this->logger;
     }
 
     /**
-     * Set parent item.
+     * Limits shipping rates request by carrier from shipping address.
      *
-     * @param OrderItemInterface $orderItem
-     * @throws InputException
-     * @throws NoSuchEntityException
-     */
-    private function addParentItem(OrderItemInterface $orderItem)
-    {
-        if ($parentId = $orderItem->getParentItemId()) {
-            $orderItem->setParentItem($this->get($parentId));
-        } else {
-            $orderCollection = $orderItem->getOrder()->getItemsCollection()->filterByParent($orderItem->getItemId());
-
-            foreach ($orderCollection->getItems() as $item) {
-                if ($item->getParentItemId() === $orderItem->getItemId()) {
-                    $item->setParentItem($orderItem);
-                }
-            }
-        }
-    }
-
-    /**
-     * Retrieve order item's buy request
+     * @param Quote $quote
      *
-     * @param OrderItemInterface $entity
-     * @return DataObject
+     * @return void
+     * @see \Magento\Shipping\Model\Shipping::collectRates
      */
-    protected function getBuyRequest(OrderItemInterface $entity)
+    private function limitShippingCarrier(Quote $quote) : void
     {
-        $request = $this->objectFactory->create(['qty' => $entity->getQtyOrdered()]);
-
-        $productType = $entity->getProductType();
-        if (isset($this->processorPool[$productType])
-            && !$entity->getParentItemId()) {
-            $productOption = $entity->getProductOption();
-            if ($productOption) {
-                $requestUpdate = $this->processorPool[$productType]->convertToBuyRequest($productOption);
-                $request->addData($requestUpdate->getData());
-            }
+        $shippingAddress = $quote->getShippingAddress();
+        if ($shippingAddress && $shippingAddress->getShippingMethod()) {
+            $shippingRate = $shippingAddress->getShippingRateByCode($shippingAddress->getShippingMethod());
+            $shippingAddress->setLimitCarrier($shippingRate->getCarrier());
         }
-
-        if (isset($this->processorPool['custom_options'])
-            && !$entity->getParentItemId()) {
-            $productOption = $entity->getProductOption();
-            if ($productOption) {
-                $requestUpdate = $this->processorPool['custom_options']->convertToBuyRequest($productOption);
-                $request->addData($requestUpdate->getData());
-            }
-        }
-
-        return $request;
     }
 }
