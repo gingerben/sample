@@ -102,7 +102,6 @@ class GuestPaymentInformationManagement implements \Magento\Checkout\Api\GuestPa
         $checkoutConnection = $this->connectionPool->getConnection('checkout');
         $salesConnection->beginTransaction();
         $checkoutConnection->beginTransaction();
-
         try {
             $this->savePaymentInformation($cartId, $email, $paymentMethod, $billingAddress);
             try {
@@ -124,6 +123,8 @@ class GuestPaymentInformationManagement implements \Magento\Checkout\Api\GuestPa
         } catch (\Exception $e) {
             $salesConnection->rollBack();
             $checkoutConnection->rollBack();
+            $this->getLogger()->info('potential duplicate order');
+            $this->getLogger()->info($e->getMessage());
             throw $e;
         }
 
