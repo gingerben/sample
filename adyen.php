@@ -81,20 +81,27 @@ class PaymentInformationManagement implements \Magento\Checkout\Api\PaymentInfor
         \Magento\Quote\Api\Data\PaymentInterface $paymentMethod,
         \Magento\Quote\Api\Data\AddressInterface $billingAddress = null
     ) {
-        $this->savePaymentInformation($cartId, $paymentMethod, $billingAddress);
         try {
-            $orderId = $this->cartManagement->placeOrder($cartId);
-        } catch (\Magento\Framework\Exception\LocalizedException $e) {
-            throw new CouldNotSaveException(
-                __($e->getMessage()),
-                $e
-            );
+        $this->savePaymentInformation($cartId, $paymentMethod, $billingAddress);
+            try {
+                    $orderId = $this->cartManagement->placeOrder($cartId);
+                } catch (\Magento\Framework\Exception\LocalizedException $e) {
+                    throw new CouldNotSaveException(
+                        __($e->getMessage()),
+                        $e
+                    );
+                } catch (\Exception $e) {
+                    $this->getLogger()->critical($e);
+                    throw new CouldNotSaveException(
+                        __('A server error stopped your order from being placed. Please try to place your order again.'),
+                        $e
+                    );
+                } 
+            }
         } catch (\Exception $e) {
-            $this->getLogger()->critical($e);
-            throw new CouldNotSaveException(
-                __('A server error stopped your order from being placed. Please try to place your order again.'),
-                $e
-            );
+            $this->getLogger()->info('potential duplicate order');
+            $this->getLogger()->info($e->getMessage());
+            throw $e;
         }
         return $orderId;
     }
