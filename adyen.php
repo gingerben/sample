@@ -98,33 +98,24 @@ class GuestPaymentInformationManagement implements \Magento\Checkout\Api\GuestPa
         \Magento\Quote\Api\Data\PaymentInterface $paymentMethod,
         \Magento\Quote\Api\Data\AddressInterface $billingAddress = null
     ) {
-        $salesConnection = $this->connectionPool->getConnection('sales');
-        $checkoutConnection = $this->connectionPool->getConnection('checkout');
-        $salesConnection->beginTransaction();
-        $checkoutConnection->beginTransaction();
 
+        $this->savePaymentInformation($cartId, $email, $paymentMethod, $billingAddress);
         try {
-            $this->savePaymentInformation($cartId, $email, $paymentMethod, $billingAddress);
-            try {
-                $orderId = $this->cartManagement->placeOrder($cartId);
-            } catch (\Magento\Framework\Exception\LocalizedException $e) {
-                throw new CouldNotSaveException(
-                    __($e->getMessage()),
-                    $e
-                );
-            } catch (\Exception $e) {
-                $this->getLogger()->critical($e);
-                throw new CouldNotSaveException(
-                    __('An error occurred on the server. Please try to place the order again.'),
-                    $e
-                );
-            }
-            $salesConnection->commit();
-            $checkoutConnection->commit();
+            $orderId = $this->cartManagement->placeOrder($cartId);
+        } catch (\Magento\Framework\Exception\LocalizedException $e) {
+            throw new CouldNotSaveException(
+                __($e->getMessage()),
+                $e
+            );
         } catch (\Exception $e) {
-            $salesConnection->rollBack();
-            $checkoutConnection->rollBack();
-            throw $e;
+            $this->getLogger()->critical($e);
+            throw new CouldNotSaveException(
+                __('An error occurred on the server. Please try to place the order again.'),
+                $e
+            );
+            
+            $this->getLogger()->info('potential duplicate order');
+            $this->getLogger()->info($e->getMessage());
         }
 
         return $orderId;
