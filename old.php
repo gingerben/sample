@@ -168,7 +168,7 @@ class ContactData
             switch ($key) {
                 case 'dob':
                     $value = $this->model->getDob()
-                        ? $this->getScopeAdjustedDob($this->model->getWebsiteId())
+                        ? $this->getScopeAdjustedDob($this->model->getStoreId())
                         : null;
                     break;
 
